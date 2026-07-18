@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/Bremcm/minidb/internal/lexer"
@@ -48,7 +50,13 @@ func execErr(t *testing.T, e *Engine, sql string) {
 func setup(t *testing.T) *Engine {
 	t.Helper()
 
-	e := New()
+	dir := t.TempDir()
+	e, err := New(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { e.Close() })
+
 	exec(t, e, "CREATE TABLE users (id INT, name TEXT, age INT)")
 	exec(t, e, "INSERT INTO users VALUES (1, 'bob', 30)")
 	exec(t, e, "INSERT INTO users VALUES (2, 'alice', 25)")
@@ -159,5 +167,71 @@ func TestStringComparison(t *testing.T) {
 	res = exec(t, e, "SELECT name FROM users WHERE name < 'bob'")
 	if len(res.Rows) != 1 || res.Rows[0][0].Text != "alice" {
 		t.Errorf("name < 'bob': ожидал только alice, получил %v", res.Rows)
+	}
+}
+
+func TestPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "persist.db")
+
+	// Сессия 1: создаём и заполняем.
+	e1, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec(t, e1, "CREATE TABLE users (id INT, name TEXT, age INT)")
+	exec(t, e1, "INSERT INTO users VALUES (1, 'bob', 30)")
+	exec(t, e1, "INSERT INTO users VALUES (2, 'alice', 25)")
+	if err := e1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Сессия 2: открываем заново.
+	e2, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e2.Close()
+
+	res := exec(t, e2, "SELECT * FROM users")
+	if len(res.Rows) != 2 {
+		t.Fatalf("после перезапуска ожидали 2 строки, получили %d", len(res.Rows))
+	}
+
+	res = exec(t, e2, "SELECT name FROM users WHERE age > 26")
+	if len(res.Rows) != 1 || res.Rows[0][0].Text != "bob" {
+		t.Errorf("фильтр после перезапуска: %v", res.Rows)
+	}
+}
+
+// Много строк — проверяем, что данные переливаются на вторую страницу.
+func TestMultiplePages(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "many.db")
+
+	e, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exec(t, e, "CREATE TABLE t (id INT, data TEXT)")
+
+	const n = 200
+	for i := 0; i < n; i++ {
+		exec(t, e, fmt.Sprintf(
+			"INSERT INTO t VALUES (%d, 'некоторый текст для объёма %d')", i, i))
+	}
+	e.Close()
+
+	// Переоткрываем и считаем.
+	e2, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e2.Close()
+
+	res := exec(t, e2, "SELECT * FROM t")
+	if len(res.Rows) != n {
+		t.Fatalf("ожидали %d строк, получили %d", n, len(res.Rows))
 	}
 }

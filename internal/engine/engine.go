@@ -11,10 +11,20 @@ type Engine struct {
 	catalog *storage.Catalog
 }
 
-func New() *Engine {
-	return &Engine{
-		catalog: storage.NewCatalog(),
+func New(path string) (*Engine, error) {
+	cat, err := storage.OpenCatalog(path)
+	if err != nil {
+		return nil, err
 	}
+	return &Engine{catalog: cat}, nil
+}
+
+func (e *Engine) Save() error {
+	return e.catalog.Save()
+}
+
+func (e *Engine) Close() error {
+	return e.catalog.Close()
 }
 
 type Result struct {
@@ -95,7 +105,9 @@ func (e *Engine) execInsert(s *ast.InsertStatement) (*Result, error) {
 		row[i] = val
 	}
 
-	table.Rows = append(table.Rows, row)
+	if err := table.AppendRow(row); err != nil {
+		return nil, err
+	}
 
 	return &Result{Message: "вставлена 1 строка"}, nil
 }
@@ -145,16 +157,16 @@ func (e *Engine) execSelect(s *ast.SelectStatement) (*Result, error) {
 
 	ctx := &evalContext{table: table}
 
-	for _, row := range table.Rows {
+	err = table.ScanRows(func(row storage.Row) error {
 		ctx.row = row
 
 		if s.Where != nil {
 			val, err := eval(s.Where, ctx)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if !isTruthy(val) {
-				continue
+				return nil
 			}
 		}
 
@@ -164,6 +176,10 @@ func (e *Engine) execSelect(s *ast.SelectStatement) (*Result, error) {
 		}
 
 		result.Rows = append(result.Rows, outRow)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
