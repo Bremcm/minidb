@@ -223,3 +223,18 @@ func FindChild(p *Page, key int64) uint32 {
 	}
 	return pos
 }
+
+// Экспортированные сеттеры для сборки узлов извне пакета.
+// В части 3 они понадобятся при разделении узлов.
+
+func SetKeyForTest(p *Page, i uint32, key int64) {
+	setKeyAt(p, i, key)
+}
+
+func SetNumKeysForTest(p *Page, n uint32) {
+	setNumKeys(p, n)
+}
+
+func SetChildForTest(p *Page, i uint32, id PageID) {
+	setChildAt(p, i, id)
+}
