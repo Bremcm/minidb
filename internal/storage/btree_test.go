@@ -48,7 +48,7 @@ func TestInsertAndSearch(t *testing.T) {
 	keys := []int64{50, 10, 90, 30, 70}
 	for _, k := range keys {
 		data := []byte(fmt.Sprintf("значение-%d", k))
-		if err := bt.insertIntoLeaf(k, data); err != nil {
+		if err := bt.Insert(k, data); err != nil {
 			t.Fatalf("вставка %d: %v", k, err)
 		}
 	}
@@ -84,7 +84,7 @@ func TestScanAllOrder(t *testing.T) {
 
 	input := []int64{50, 10, 90, 30, 70, 20}
 	for _, k := range input {
-		bt.insertIntoLeaf(k, []byte(fmt.Sprintf("v%d", k)))
+		bt.Insert(k, []byte(fmt.Sprintf("v%d", k)))
 	}
 
 	var got []int64
@@ -112,7 +112,7 @@ func TestScanFromKey(t *testing.T) {
 	bt, _ := newTestTree(t)
 
 	for _, k := range []int64{10, 20, 30, 40, 50} {
-		bt.insertIntoLeaf(k, []byte("x"))
+		bt.Insert(k, []byte("x"))
 	}
 
 	cases := []struct {
@@ -151,7 +151,7 @@ func TestScanEarlyStop(t *testing.T) {
 	bt, _ := newTestTree(t)
 
 	for k := int64(1); k <= 10; k++ {
-		bt.insertIntoLeaf(k, []byte("x"))
+		bt.Insert(k, []byte("x"))
 	}
 
 	stopErr := fmt.Errorf("хватит")
@@ -194,7 +194,7 @@ func TestTreePersistence(t *testing.T) {
 		rootID = bt.Root()
 
 		for _, k := range []int64{10, 20, 30} {
-			bt.insertIntoLeaf(k, []byte(fmt.Sprintf("v%d", k)))
+			bt.Insert(k, []byte(fmt.Sprintf("v%d", k)))
 		}
 
 		if err := pager.Close(); err != nil {
@@ -313,6 +313,197 @@ func TestMultiLevelDescent(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("позиция %d: %d, ожидали %d", i, got[i], want[i])
+		}
+	}
+}
+
+// Вставка большого количества ключей должна вырастить дерево.
+func TestInsertManySequential(t *testing.T) {
+	bt, _ := newTestTree(t)
+
+	const n = 5000
+
+	for i := int64(0); i < n; i++ {
+		data := []byte(fmt.Sprintf("значение номер %d", i))
+		if err := bt.Insert(i, data); err != nil {
+			t.Fatalf("вставка %d: %v", i, err)
+		}
+	}
+
+	// Все ключи должны находиться.
+	for i := int64(0); i < n; i++ {
+		data, found, err := bt.Search(i)
+		if err != nil {
+			t.Fatalf("поиск %d: %v", i, err)
+		}
+		if !found {
+			t.Fatalf("ключ %d не найден после %d вставок", i, n)
+		}
+		want := []byte(fmt.Sprintf("значение номер %d", i))
+		if !bytes.Equal(data, want) {
+			t.Fatalf("ключ %d: данные %q, ожидали %q", i, data, want)
+		}
+	}
+}
+
+// То же, но ключи вставляются вразнобой.
+func TestInsertManyShuffled(t *testing.T) {
+	bt, _ := newTestTree(t)
+
+	const n = 3000
+
+	// Псевдослучайный порядок без импорта math/rand:
+	// шаг взаимно прост с n, значит обойдём все значения.
+	keys := make([]int64, 0, n)
+	for i, k := 0, int64(0); i < n; i++ {
+		keys = append(keys, k)
+		k = (k + 997) % n
+	}
+
+	for _, k := range keys {
+		if err := bt.Insert(k, []byte(fmt.Sprintf("v%d", k))); err != nil {
+			t.Fatalf("вставка %d: %v", k, err)
+		}
+	}
+
+	for i := int64(0); i < n; i++ {
+		_, found, err := bt.Search(i)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			t.Fatalf("ключ %d не найден", i)
+		}
+	}
+}
+
+// Главный тест: после множества сплитов сканирование
+// должно дать все ключи строго по возрастанию.
+func TestScanAfterSplits(t *testing.T) {
+	bt, _ := newTestTree(t)
+
+	const n = 2000
+
+	for i := int64(n - 1); i >= 0; i-- { // вставляем в обратном порядке
+		bt.Insert(i, []byte(fmt.Sprintf("v%d", i)))
+	}
+
+	var prev int64 = -1
+	count := 0
+
+	err := bt.ScanAll(func(key int64, data []byte) error {
+		if key <= prev {
+			return fmt.Errorf("порядок нарушен: %d после %d", key, prev)
+		}
+		prev = key
+		count++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if count != n {
+		t.Fatalf("просканировано %d записей, ожидали %d", count, n)
+	}
+}
+
+// Диапазонное сканирование после сплитов.
+func TestRangeScanAfterSplits(t *testing.T) {
+	bt, _ := newTestTree(t)
+
+	const n = 2000
+	for i := int64(0); i < n; i++ {
+		bt.Insert(i, []byte("x"))
+	}
+
+	const start = 1500
+	count := 0
+
+	bt.Scan(start, func(key int64, data []byte) error {
+		if key < start {
+			return fmt.Errorf("ключ %d меньше стартового %d", key, start)
+		}
+		count++
+		return nil
+	})
+
+	if count != n-start {
+		t.Fatalf("в диапазоне %d записей, ожидали %d", count, n-start)
+	}
+}
+
+// Дубликаты по-прежнему отвергаются.
+func TestInsertDuplicateAfterSplit(t *testing.T) {
+	bt, _ := newTestTree(t)
+
+	for i := int64(0); i < 500; i++ {
+		bt.Insert(i, []byte("x"))
+	}
+
+	if err := bt.Insert(250, []byte("другое")); err == nil {
+		t.Error("повторная вставка ключа 250 должна давать ошибку")
+	}
+}
+
+// Дерево с несколькими уровнями переживает переоткрытие.
+func TestLargeTreePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.db")
+
+	var rootID disk.PageID
+	const n = 3000
+
+	{
+		dm, err := disk.NewDiskManager(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pager := disk.NewPager(dm)
+
+		bt, err := NewBTree(pager)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for i := int64(0); i < n; i++ {
+			if err := bt.Insert(i, []byte(fmt.Sprintf("v%d", i))); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		rootID = bt.Root()
+		if err := pager.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	{
+		dm, err := disk.NewDiskManager(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer dm.Close()
+
+		pager := disk.NewPager(dm)
+		bt := OpenBTree(pager, rootID)
+
+		count := 0
+		bt.ScanAll(func(key int64, data []byte) error {
+			count++
+			return nil
+		})
+
+		if count != n {
+			t.Fatalf("после переоткрытия %d записей, ожидали %d", count, n)
+		}
+
+		// Точечный поиск в середине.
+		data, found, _ := bt.Search(1500)
+		if !found {
+			t.Fatal("ключ 1500 не найден после переоткрытия")
+		}
+		if !bytes.Equal(data, []byte("v1500")) {
+			t.Errorf("данные: %q", data)
 		}
 	}
 }

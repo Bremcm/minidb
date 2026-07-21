@@ -238,3 +238,88 @@ func SetNumKeysForTest(p *Page, n uint32) {
 func SetChildForTest(p *Page, i uint32, id PageID) {
 	setChildAt(p, i, id)
 }
+
+// ------------------------------ //
+
+const maxInternalKeys = maxLeafKeys - 1
+
+func InternalInsert(p *Page, key int64, child PageID) error {
+	n := numKeys(p)
+	if n >= maxInternalKeys {
+		return fmt.Errorf("внутренний узел заполнен: %d ключей", n)
+	}
+
+	pos, _ := SearchKey(p, key)
+
+	for i := n; i > pos; i-- {
+		setKeyAt(p, i, KeyAt(p, i-1))
+	}
+
+	for i := n + 1; i > pos+1; i-- {
+		setChildAt(p, i, ChildAt(p, i-1))
+	}
+
+	setKeyAt(p, pos, key)
+	setChildAt(p, pos+1, child)
+	setNumKeys(p, n+1)
+
+	return nil
+}
+
+func SplitLeaf(left *Page, right *Page) int64 {
+	n := numKeys(left)
+	mid := n / 2
+
+	oldNext := nextLeaf(left)
+
+	InitLeaf(right)
+
+	for i := mid; i < n; i++ {
+		key := KeyAt(left, i)
+		offset, length := readLeafSlot(left, i)
+		data := left[offset : offset+length]
+		if err := LeafInsert(right, key, data); err != nil {
+			panic(fmt.Sprintf("SplitLeaf: правая половина не влезла: %v", err))
+		}
+	}
+
+	var tmp Page
+	InitLeaf(&tmp)
+	for i := uint32(0); i < mid; i++ {
+		key := KeyAt(left, i)
+		offset, length := readLeafSlot(left, i)
+		data := left[offset : offset+length]
+		if err := LeafInsert(&tmp, key, data); err != nil {
+			panic(fmt.Sprintf("SplitLeaf: левая половина не влезла: %v", err))
+		}
+	}
+	*left = tmp
+
+	setNextLeaf(right, oldNext)
+
+	return KeyAt(right, 0)
+}
+
+func SplitInternal(left *Page, right *Page) int64 {
+	n := numKeys(left)
+	mid := n / 2
+
+	upKey := KeyAt(left, mid)
+
+	InitInternal(right)
+
+	rightKeys := uint32(0)
+	for i := mid + 1; i < n; i++ {
+		setKeyAt(right, rightKeys, KeyAt(left, i))
+		rightKeys++
+	}
+
+	for i := uint32(0); i <= rightKeys; i++ {
+		setChildAt(right, i, ChildAt(left, mid+1+i))
+	}
+
+	setNumKeys(right, rightKeys)
+	setNumKeys(left, mid)
+
+	return upKey
+}
