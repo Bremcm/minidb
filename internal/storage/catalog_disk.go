@@ -23,10 +23,8 @@ func serializeCatalog(tables map[string]*Table) []byte {
 			buf = append(buf, byte(c.Type))
 		}
 
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(t.pages)))
-		for _, pid := range t.pages {
-			buf = binary.LittleEndian.AppendUint32(buf, uint32(pid))
-		}
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(t.root))
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(t.keyCol))
 	}
 
 	return buf
@@ -94,24 +92,20 @@ func deserializeCatalog(buf []byte) (map[string]*Table, error) {
 			cols = append(cols, Column{Name: colName, Type: colType})
 		}
 
-		numPages, err := readU32()
+		rootRaw, err := readU32()
 		if err != nil {
 			return nil, err
 		}
-
-		pages := make([]disk.PageID, 0, numPages)
-		for j := uint32(0); j < numPages; j++ {
-			pid, err := readU32()
-			if err != nil {
-				return nil, err
-			}
-			pages = append(pages, disk.PageID(pid))
+		keyColRaw, err := readU32()
+		if err != nil {
+			return nil, err
 		}
 
 		tables[name] = &Table{
 			Name:    name,
 			Columns: cols,
-			pages:   pages,
+			root:    disk.PageID(rootRaw),
+			keyCol:  int(keyColRaw),
 		}
 	}
 

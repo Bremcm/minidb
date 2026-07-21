@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/Bremcm/minidb/internal/ast"
+	"github.com/Bremcm/minidb/internal/lexer"
 	"github.com/Bremcm/minidb/internal/storage"
 )
 
@@ -121,6 +122,23 @@ func (e *Engine) execSelect(s *ast.SelectStatement) (*Result, error) {
 	var outIdx []int
 	var outNames []string
 
+	if key, ok := indexableKey(s.Where, table); ok {
+		row, found, err := table.SearchRow(key)
+		if err != nil {
+			return nil, err
+		}
+
+		result := &Result{Columns: outNames, Rows: []storage.Row{}}
+		if found {
+			outRow := make(storage.Row, len(outIdx))
+			for i, idx := range outIdx {
+				outRow[i] = row[idx]
+			}
+			result.Rows = append(result.Rows, outRow)
+		}
+		return result, nil
+	}
+
 	if s.Columns == nil {
 		outIdx = make([]int, len(table.Columns))
 		outNames = make([]string, len(table.Columns))
@@ -183,4 +201,31 @@ func (e *Engine) execSelect(s *ast.SelectStatement) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+func indexableKey(where ast.Expression, table *storage.Table) (int64, bool) {
+	if where == nil {
+		return 0, false
+	}
+
+	bin, ok := where.(*ast.BinaryExpression)
+	if !ok || bin.Operator != lexer.EQ {
+		return 0, false
+	}
+
+	keyColName := table.Columns[table.KeyColumn()].Name
+
+	if id, ok := bin.Left.(*ast.Identifier); ok && id.Name == keyColName {
+		if lit, ok := bin.Right.(*ast.IntegerLiteral); ok {
+			return lit.Value, true
+		}
+	}
+
+	if id, ok := bin.Right.(*ast.Identifier); ok && id.Name == keyColName {
+		if lit, ok := bin.Left.(*ast.IntegerLiteral); ok {
+			return lit.Value, true
+		}
+	}
+
+	return 0, false
 }

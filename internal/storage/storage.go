@@ -59,8 +59,10 @@ type Table struct {
 	Name    string
 	Columns []Column
 
-	pages []disk.PageID
-	pager *disk.Pager
+	keyCol int
+	tree   *BTree
+	root   disk.PageID
+	pager  *disk.Pager
 }
 
 func (t *Table) ColumnIndex(name string) (int, bool) {
@@ -75,6 +77,66 @@ func (t *Table) ColumnIndex(name string) (int, bool) {
 type Catalog struct {
 	tables map[string]*Table
 	pager  *disk.Pager
+}
+
+func findKeyColumn(cols []Column) (int, error) {
+	for i, c := range cols {
+		if c.Type == TypeInt {
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("таблице нужна хотя бы одна INT-колонка для ключа")
+}
+
+func (t *Table) AppendRow(row Row) error {
+	if len(row) <= t.keyCol {
+		return fmt.Errorf("в строке нет ключевой колонки")
+	}
+
+	keyVal := row[t.keyCol]
+	if keyVal.Type != TypeInt {
+		return fmt.Errorf("ключевая колонка должна быть INT, получили %s",
+			keyVal.Type)
+	}
+
+	data := SerializeRow(row)
+
+	if err := t.tree.Insert(keyVal.Int, data); err != nil {
+		return err
+	}
+
+	t.root = t.tree.Root()
+	return nil
+}
+
+func (t *Table) ScanRows(fn func(Row) error) error {
+	return t.tree.ScanAll(func(key int64, data []byte) error {
+		row, err := DeserializeRow(data)
+		if err != nil {
+			return fmt.Errorf("ключ %d: %w", key, err)
+		}
+		return fn(row)
+	})
+}
+
+func (t *Table) SearchRow(key int64) (Row, bool, error) {
+	data, found, err := t.tree.Search(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+
+	row, err := DeserializeRow(data)
+	if err != nil {
+		return nil, false, err
+	}
+	return row, true, nil
+}
+
+func (t *Table) KeyColumn() int {
+	return t.keyCol
 }
 
 func OpenCatalog(path string) (*Catalog, error) {
@@ -119,6 +181,7 @@ func OpenCatalog(path string) (*Catalog, error) {
 
 		for _, t := range tables {
 			t.pager = pager
+			t.tree = OpenBTree(pager, t.root)
 		}
 		c.tables = tables
 	}
@@ -149,10 +212,22 @@ func (c *Catalog) CreateTable(name string, cols []Column) error {
 		return fmt.Errorf("таблица %q уже существует", name)
 	}
 
+	keyCol, err := findKeyColumn(cols)
+	if err != nil {
+		return err
+	}
+
+	tree, err := NewBTree(c.pager)
+	if err != nil {
+		return err
+	}
+
 	c.tables[name] = &Table{
 		Name:    name,
 		Columns: cols,
-		pages:   []disk.PageID{},
+		keyCol:  keyCol,
+		tree:    tree,
+		root:    tree.Root(),
 		pager:   c.pager,
 	}
 
@@ -179,68 +254,4 @@ func (c *Catalog) Close() error {
 		return err
 	}
 	return c.pager.Close()
-}
-
-func (t *Table) AppendRow(row Row) error {
-	data := SerializeRow(row)
-
-	if uint32(len(data)) > disk.PageSize/2 {
-		return fmt.Errorf("строка слишком велика: %d байт", len(data))
-	}
-
-	if len(t.pages) > 0 {
-		last := t.pages[len(t.pages)-1]
-
-		page, err := t.pager.FetchPage(last)
-		if err != nil {
-			return err
-		}
-
-		if _, err := disk.InsertRow(page, data); err == nil {
-			t.pager.MarkDirty(last)
-			return nil
-		}
-	}
-
-	id, page, err := t.pager.AllocatePage()
-	if err != nil {
-		return err
-	}
-
-	if _, err := disk.InsertRow(page, data); err != nil {
-		return fmt.Errorf("строка не влезает даже в пустую страницу: %w", err)
-	}
-
-	t.pager.MarkDirty(id)
-	t.pages = append(t.pages, id)
-
-	return nil
-}
-
-func (t *Table) ScanRows(fn func(Row) error) error {
-	for _, pid := range t.pages {
-		page, err := t.pager.FetchPage(pid)
-		if err != nil {
-			return err
-		}
-
-		n := disk.NumRows(page)
-		for i := uint32(0); i < n; i++ {
-			data, err := disk.ReadRow(page, i)
-			if err != nil {
-				return fmt.Errorf("страница %d слот %d: %w", pid, i, err)
-			}
-
-			row, err := DeserializeRow(data)
-			if err != nil {
-				return fmt.Errorf("страница %d слот %d: %w", pid, i, err)
-			}
-
-			if err := fn(row); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
 }
