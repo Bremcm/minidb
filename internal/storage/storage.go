@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/Bremcm/minidb/internal/storage/disk"
+	"github.com/Bremcm/minidb/internal/storage/wal"
 )
 
 type ValueType int
@@ -77,6 +78,7 @@ func (t *Table) ColumnIndex(name string) (int, bool) {
 type Catalog struct {
 	tables map[string]*Table
 	pager  *disk.Pager
+	wal    *wal.WAL
 }
 
 func findKeyColumn(cols []Column) (int, error) {
@@ -147,9 +149,18 @@ func OpenCatalog(path string) (*Catalog, error) {
 
 	pager := disk.NewPager(dm)
 
+	walPath := path + ".wal"
+
+	w, err := wal.Open(walPath)
+	if err != nil {
+		return nil, fmt.Errorf("открытие журнала: %w", err)
+	}
+	pager.SetLogger(w)
+
 	c := &Catalog{
 		tables: make(map[string]*Table),
 		pager:  pager,
+		wal:    w,
 	}
 
 	if dm.NumPages() == 0 {
@@ -253,5 +264,11 @@ func (c *Catalog) Close() error {
 	if err := c.saveCatalog(); err != nil {
 		return err
 	}
-	return c.pager.Close()
+	if err := c.pager.Close(); err != nil {
+		return err
+	}
+	if c.wal != nil {
+		return c.wal.Close()
+	}
+	return nil
 }

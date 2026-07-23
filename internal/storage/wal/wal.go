@@ -221,3 +221,8 @@ func (w *WAL) Close() error {
 func (w *WAL) Path() string {
 	return w.path
 }
+
+// Проверка, что *WAL удовлетворяет интерфейсу disk.Logger.
+// Если сигнатуры разойдутся — не скомпилируется здесь,
+// а не в далёком месте использования.
+var _ disk.Logger = (*WAL)(nil)

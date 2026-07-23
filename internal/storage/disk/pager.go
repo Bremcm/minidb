@@ -2,6 +2,13 @@ package disk
 
 import "fmt"
 
+type Logger interface {
+	Begin() (uint64, error)
+	WritePage(txID uint64, pageID PageID, page *Page) error
+	Commit(txID uint64) error
+	Truncate() error
+}
+
 type frame struct {
 	page  Page
 	id    PageID
@@ -11,6 +18,7 @@ type frame struct {
 type Pager struct {
 	dm     *DiskManager
 	frames map[PageID]*frame
+	log    Logger
 }
 
 func NewPager(dm *DiskManager) *Pager {
@@ -18,6 +26,10 @@ func NewPager(dm *DiskManager) *Pager {
 		dm:     dm,
 		frames: make(map[PageID]*frame),
 	}
+}
+
+func (p *Pager) SetLogger(l Logger) {
+	p.log = l
 }
 
 func (p *Pager) FetchPage(id PageID) (*Page, error) {
@@ -55,10 +67,7 @@ func (p *Pager) AllocatePage() (PageID, *Page, error) {
 
 func (p *Pager) FlushPage(id PageID) error {
 	f, ok := p.frames[id]
-	if !ok {
-		return nil
-	}
-	if !f.dirty {
+	if !ok || !f.dirty {
 		return nil
 	}
 
@@ -71,12 +80,54 @@ func (p *Pager) FlushPage(id PageID) error {
 }
 
 func (p *Pager) FlushAll() error {
-	for id := range p.frames {
-		if err := p.FlushPage(id); err != nil {
-			return err
+	dirty := make([]PageID, 0, len(p.frames))
+	for id, f := range p.frames {
+		if f.dirty {
+			dirty = append(dirty, id)
 		}
 	}
-	return p.dm.Sync()
+
+	if len(dirty) == 0 {
+		return nil
+	}
+
+	if p.log != nil {
+		txID, err := p.log.Begin()
+		if err != nil {
+			return fmt.Errorf("начало транзакции журнала: %w", err)
+		}
+
+		for _, id := range dirty {
+			f := p.frames[id]
+			if err := p.log.WritePage(txID, id, &f.page); err != nil {
+				return fmt.Errorf("запись страницы %d в журнал: %w", id, err)
+			}
+		}
+
+		if err := p.log.Commit(txID); err != nil {
+			return fmt.Errorf("коммит журнала: %w", err)
+		}
+	}
+
+	for _, id := range dirty {
+		f := p.frames[id]
+		if err := p.dm.WritePage(id, &f.page); err != nil {
+			return fmt.Errorf("запись страницы %d: %w", id, err)
+		}
+		f.dirty = false
+	}
+
+	if err := p.dm.Sync(); err != nil {
+		return fmt.Errorf("sync файла данных: %w", err)
+	}
+
+	if p.log != nil {
+		if err := p.log.Truncate(); err != nil {
+			return fmt.Errorf("очистка журнала: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (p *Pager) Close() error {
