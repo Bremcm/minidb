@@ -222,6 +222,54 @@ func (w *WAL) Path() string {
 	return w.path
 }
 
+func Recover(walPath string, dm *disk.DiskManager) error {
+	records, err := ReadAll(walPath)
+	if err != nil {
+		return fmt.Errorf("чтение журнала при восстановлении: %w", err)
+	}
+
+	if len(records) == 0 {
+		return nil
+	}
+
+	committed := make(map[uint64]bool)
+	for _, rec := range records {
+		if rec.Type == RecordCommit {
+			committed[rec.TxID] = true
+		}
+	}
+
+	if len(committed) == 0 {
+		return nil
+	}
+
+	applied := 0
+	for i := range records {
+		rec := &records[i]
+
+		if rec.Type != RecordPage {
+			continue
+		}
+		if !committed[rec.TxID] {
+			continue
+		}
+
+		if err := dm.WritePage(rec.PageID, &rec.Page); err != nil {
+			return fmt.Errorf("применение страницы %d при восстановлении: %w",
+				rec.PageID, err)
+		}
+		applied++
+	}
+
+	if applied > 0 {
+		if err := dm.Sync(); err != nil {
+			return fmt.Errorf("sync после восстановления: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // Проверка, что *WAL удовлетворяет интерфейсу disk.Logger.
 // Если сигнатуры разойдутся — не скомпилируется здесь,
 // а не в далёком месте использования.

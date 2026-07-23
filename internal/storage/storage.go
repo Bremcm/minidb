@@ -147,14 +147,21 @@ func OpenCatalog(path string) (*Catalog, error) {
 		return nil, err
 	}
 
-	pager := disk.NewPager(dm)
-
 	walPath := path + ".wal"
+
+	if err := wal.Recover(walPath, dm); err != nil {
+		return nil, fmt.Errorf("восстановление: %w", err)
+	}
 
 	w, err := wal.Open(walPath)
 	if err != nil {
 		return nil, fmt.Errorf("открытие журнала: %w", err)
 	}
+	if err := w.Truncate(); err != nil {
+		return nil, fmt.Errorf("очистка журнала после восстановления: %w", err)
+	}
+
+	pager := disk.NewPager(dm)
 	pager.SetLogger(w)
 
 	c := &Catalog{
@@ -184,12 +191,10 @@ func OpenCatalog(path string) (*Catalog, error) {
 		if err != nil {
 			return nil, fmt.Errorf("чтение каталога: %w", err)
 		}
-
 		tables, err := deserializeCatalog(data)
 		if err != nil {
 			return nil, err
 		}
-
 		for _, t := range tables {
 			t.pager = pager
 			t.tree = OpenBTree(pager, t.root)
